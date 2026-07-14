@@ -1,0 +1,428 @@
+// Copyright (c) 2026 - opx
+using System.Text.Json;
+using System.Text;
+using System.Net.Http.Headers;
+
+namespace Opx.Api.Client;
+
+public sealed class OpxApiClient : IOpxApiClient, IDisposable
+{
+	private readonly HttpClient _httpClient;
+	private readonly bool _disposeHttpClient;
+	private readonly JsonSerializerOptions _jsonOptions;
+	private readonly Version _httpVersion;
+	private readonly HttpVersionPolicy _httpVersionPolicy;
+	private readonly OpxApiClientOptions _options;
+	private readonly IOpxTokenProvider? _tokenProvider;
+	private string _baseAddress;
+	private string _errorMessage = string.Empty;
+	private string _requestedUrl = string.Empty;
+	private HttpResponseMessage? _responseMessage;
+
+	public OpxApiClient(
+		string baseAddress,
+		Version? httpVersion = null,
+		HttpVersionPolicy httpVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+		HttpMessageHandler? handler = null,
+		IOpxTokenProvider? tokenProvider = null,
+		OpxApiClientOptions? options = null)
+	{
+		_options = options ?? new OpxApiClientOptions();
+		_tokenProvider = tokenProvider;
+		_httpVersion = httpVersion ?? System.Net.HttpVersion.Version20;
+		_httpVersionPolicy = httpVersionPolicy;
+		_httpClient = handler is null
+			? new HttpClient(new SocketsHttpHandler { UseProxy = false })
+			: new HttpClient(handler);
+		_httpClient.Timeout = Timeout.InfiniteTimeSpan;
+		_disposeHttpClient = true;
+		_baseAddress = NormalizeBaseAddress(baseAddress);
+		_jsonOptions = new JsonSerializerOptions
+		{
+			PropertyNameCaseInsensitive = true
+		};
+	}
+
+	public OpxApiClient(HttpClient httpClient, OpxApiClientOptions? options = null, IOpxTokenProvider? tokenProvider = null)
+	{
+		_options = options ?? new OpxApiClientOptions();
+		_tokenProvider = tokenProvider;
+		_httpClient = httpClient;
+		_disposeHttpClient = false;
+		_httpVersion = _options.HttpVersion;
+		_httpVersionPolicy = _options.HttpVersionPolicy;
+		_baseAddress = NormalizeBaseAddress(_options.BaseAddress ?? httpClient.BaseAddress?.ToString() ?? string.Empty);
+		_jsonOptions = new JsonSerializerOptions
+		{
+			PropertyNameCaseInsensitive = true
+		};
+	}
+
+	public string BaseAddress
+	{
+		get => _baseAddress;
+		set => _baseAddress = NormalizeBaseAddress(value);
+	}
+
+	public string RequestedUrl => _requestedUrl;
+	public string ErrorMessage => _errorMessage;
+	public HttpResponseMessage? ResponseMessage => _responseMessage;
+	public TimeSpan TimeOut
+	{
+		get => _httpClient.Timeout;
+		set => _httpClient.Timeout = value;
+	}
+
+	public Task<OpxApiResult<T>> GetAsync<T>(string path, OpxApiRequest? request = null)
+	{
+		return GetAsync<T>(path, request, CancellationToken.None);
+	}
+
+	public Task<OpxApiResult<T>> GetAsync<T>(string path, OpxApiRequest? request, CancellationToken cancellationToken)
+	{
+		return SendAsync<T>(HttpMethod.Get, path, request, cancellationToken);
+	}
+
+	public OpxApiResult<T> Get<T>(string path, OpxApiRequest? request = null)
+	{
+		return Send<T>(HttpMethod.Get, path, request);
+	}
+
+	public Task<OpxApiResult<T>> PostAsync<T>(string path, OpxApiRequest? request = null)
+	{
+		return PostAsync<T>(path, request, CancellationToken.None);
+	}
+
+	public Task<OpxApiResult<T>> PostAsync<T>(string path, OpxApiRequest? request, CancellationToken cancellationToken)
+	{
+		return SendAsync<T>(HttpMethod.Post, path, request, cancellationToken);
+	}
+
+	public OpxApiResult<T> Post<T>(string path, OpxApiRequest? request = null)
+	{
+		return Send<T>(HttpMethod.Post, path, request);
+	}
+
+	public Task<OpxApiResult<T>> PutAsync<T>(string path, OpxApiRequest? request = null)
+	{
+		return PutAsync<T>(path, request, CancellationToken.None);
+	}
+
+	public Task<OpxApiResult<T>> PutAsync<T>(string path, OpxApiRequest? request, CancellationToken cancellationToken)
+	{
+		return SendAsync<T>(HttpMethod.Put, path, request, cancellationToken);
+	}
+
+	public OpxApiResult<T> Put<T>(string path, OpxApiRequest? request = null)
+	{
+		return Send<T>(HttpMethod.Put, path, request);
+	}
+
+	public Task<OpxApiResult<T>> DeleteAsync<T>(string path, OpxApiRequest? request = null)
+	{
+		return DeleteAsync<T>(path, request, CancellationToken.None);
+	}
+
+	public Task<OpxApiResult<T>> DeleteAsync<T>(string path, OpxApiRequest? request, CancellationToken cancellationToken)
+	{
+		return SendAsync<T>(HttpMethod.Delete, path, request, cancellationToken);
+	}
+
+	public OpxApiResult<T> Delete<T>(string path, OpxApiRequest? request = null)
+	{
+		return Send<T>(HttpMethod.Delete, path, request);
+	}
+
+	public async Task<OpxApiResult<T>> SendAsync<T>(HttpMethod method, string path, OpxApiRequest? request = null)
+	{
+		return await SendAsync<T>(method, path, request, CancellationToken.None);
+	}
+
+	public async Task<OpxApiResult<T>> SendAsync<T>(HttpMethod method, string path, OpxApiRequest? request, CancellationToken cancellationToken)
+	{
+		var manualBearerToken = !string.IsNullOrWhiteSpace(request?.BearerToken);
+		var bearerToken = await GetBearerTokenAsync(request, cancellationToken);
+		using var message = CreateRequest(method, path, request, bearerToken);
+		var result = await SendCoreAsync<T>(message, cancellationToken);
+
+		if (!_options.RetryOnceOnUnauthorized || manualBearerToken || result.StatusCode != "401" || _tokenProvider is null)
+		{
+			return result;
+		}
+
+		var refreshedToken = await _tokenProvider.RefreshTokenAsync(cancellationToken);
+		if (refreshedToken is not { HasAccessToken: true })
+		{
+			return result;
+		}
+
+		using var retryMessage = CreateRequest(method, path, request, refreshedToken.AccessToken);
+		return await SendCoreAsync<T>(retryMessage, cancellationToken);
+	}
+
+	public OpxApiResult<T> Send<T>(HttpMethod method, string path, OpxApiRequest? request = null)
+	{
+		return SendAsync<T>(method, path, request).GetAwaiter().GetResult();
+	}
+
+	public void Dispose()
+	{
+		_responseMessage?.Dispose();
+		if (_disposeHttpClient)
+		{
+			_httpClient.Dispose();
+		}
+	}
+
+	private async Task<OpxApiResult<T>> SendCoreAsync<T>(HttpRequestMessage message, CancellationToken cancellationToken)
+	{
+		HttpResponseMessage? responseMessage = null;
+		try
+		{
+			responseMessage = await _httpClient.SendAsync(message, cancellationToken);
+
+			if (!responseMessage.IsSuccessStatusCode)
+			{
+				_errorMessage = !string.IsNullOrWhiteSpace(responseMessage.ReasonPhrase)
+					? responseMessage.ReasonPhrase!
+					: responseMessage.ToString();
+				return OpxApiResult<T>.Fail(_errorMessage, GetStatusCode(responseMessage));
+			}
+
+			await using var stream = await responseMessage.Content.ReadAsStreamAsync(cancellationToken);
+			using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+			return ReadResponse<T>(document.RootElement, GetStatusCode(responseMessage));
+		}
+		catch (OperationCanceledException)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_errorMessage = ex.Message;
+			return OpxApiResult<T>.Fail(_errorMessage, GetStatusCode(responseMessage));
+		}
+		finally
+		{
+			if (responseMessage is not null)
+			{
+				var previousResponse = Interlocked.Exchange(ref _responseMessage, responseMessage);
+				previousResponse?.Dispose();
+			}
+		}
+	}
+
+	private static string GetStatusCode(HttpResponseMessage? responseMessage)
+	{
+		return ((int?)responseMessage?.StatusCode)?.ToString() ?? "0";
+	}
+
+	private OpxApiResult<T> ReadResponse<T>(JsonElement root, string httpStatusCode)
+	{
+		if (root.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+		{
+			return OpxApiResult<T>.Fail("Empty response", httpStatusCode);
+		}
+
+		var result = root.TryGetProperty("result", out var resultElement)
+			&& resultElement.ValueKind is JsonValueKind.True or JsonValueKind.False
+			&& resultElement.GetBoolean();
+		var statusCode = root.TryGetProperty("statusCode", out var statusCodeElement)
+			? statusCodeElement.ToString()
+			: httpStatusCode;
+		var data = root.TryGetProperty("data", out var dataElement)
+			? dataElement
+			: default;
+
+		if (!result)
+		{
+			return new OpxApiResult<T>
+			{
+				Result = false,
+				StatusCode = string.IsNullOrWhiteSpace(statusCode) ? httpStatusCode : statusCode,
+				Message = TryReadMessage(data)
+			};
+		}
+
+		return OpxApiResult<T>.FromTypedResponse(new OpxApiResponse<T>
+		{
+			Result = true,
+			StatusCode = string.IsNullOrWhiteSpace(statusCode) ? httpStatusCode : statusCode,
+			Data = ConvertData<T>(data)
+		});
+	}
+
+	private T? ConvertData<T>(JsonElement data)
+	{
+		if (data.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+		{
+			return default;
+		}
+
+		if (typeof(T) == typeof(JsonElement))
+		{
+			return (T)(object)data.Clone();
+		}
+
+		if (typeof(T) == typeof(string))
+		{
+			return (T)(object)data.ToString();
+		}
+
+		return data.Deserialize<T>(_jsonOptions);
+	}
+
+	private static string? TryReadMessage(JsonElement data)
+	{
+		if (data.ValueKind == JsonValueKind.String)
+		{
+			return data.GetString();
+		}
+
+		if (data.ValueKind == JsonValueKind.Object
+			&& data.TryGetProperty("message", out var message)
+			&& message.ValueKind == JsonValueKind.String)
+		{
+			return message.GetString();
+		}
+
+		return null;
+	}
+
+	private async Task<string?> GetBearerTokenAsync(OpxApiRequest? request, CancellationToken cancellationToken)
+	{
+		if (!string.IsNullOrWhiteSpace(request?.BearerToken))
+		{
+			return request.BearerToken;
+		}
+
+		if (_tokenProvider is null)
+		{
+			return null;
+		}
+
+		var token = await _tokenProvider.GetTokenAsync(cancellationToken);
+		if (token is null)
+		{
+			return null;
+		}
+
+		var utcNow = DateTimeOffset.UtcNow;
+		if (token.IsExpired(utcNow) || token.ShouldRefresh(utcNow, _options.RefreshTokenBeforeExpires))
+		{
+			token = await _tokenProvider.RefreshTokenAsync(cancellationToken);
+		}
+
+		return token is { HasAccessToken: true } && !token.IsExpired(DateTimeOffset.UtcNow)
+			? token.AccessToken
+			: null;
+	}
+
+	private HttpRequestMessage CreateRequest(HttpMethod method, string path, OpxApiRequest? request, string? bearerToken)
+	{
+		var url = BuildUrl(path, request);
+		_requestedUrl = url;
+		var message = new HttpRequestMessage(method, url)
+		{
+			Version = _httpVersion,
+			VersionPolicy = _httpVersionPolicy
+		};
+
+		message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+		if (!string.IsNullOrWhiteSpace(bearerToken))
+		{
+			message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
+		}
+
+		if (request?.Headers is not null)
+		{
+			foreach (var header in request.Headers)
+			{
+				if (!string.IsNullOrWhiteSpace(header.Key) && header.Value is not null)
+				{
+					message.Headers.TryAddWithoutValidation(header.Key, header.Value);
+				}
+			}
+		}
+
+		if (request?.FromBody is not null)
+		{
+			var json = JsonSerializer.Serialize(request.FromBody, _jsonOptions);
+			message.Content = new StringContent(json, Encoding.UTF8, "application/json");
+		}
+		else if (method != HttpMethod.Get && method != HttpMethod.Delete)
+		{
+			message.Content = new StringContent(string.Empty, Encoding.UTF8, "application/json");
+		}
+
+		return message;
+	}
+
+	private string BuildUrl(string path, OpxApiRequest? request)
+	{
+		if (Uri.TryCreate(path, UriKind.Absolute, out var absoluteUri))
+		{
+			return ApplyQuery(absoluteUri.ToString(), request?.FromQuery);
+		}
+
+		var routePath = ApplyRoute(path, request?.FromRoute);
+		var url = string.Concat(_baseAddress, routePath.TrimStart('/'));
+		return ApplyQuery(url, request?.FromQuery);
+	}
+
+	private static string ApplyRoute(string path, object? route)
+	{
+		if (route is null)
+		{
+			return path;
+		}
+
+		var result = path;
+		foreach (var property in route.GetType().GetProperties())
+		{
+			var value = Uri.EscapeDataString(property.GetValue(route)?.ToString() ?? string.Empty);
+			result = result.Replace("{" + property.Name + "}", value, StringComparison.OrdinalIgnoreCase);
+		}
+
+		return result;
+	}
+
+	private static string ApplyQuery(string url, object? query)
+	{
+		if (query is null)
+		{
+			return url;
+		}
+
+		var values = query.GetType()
+			.GetProperties()
+			.Select(property => new
+			{
+				property.Name,
+				Value = property.GetValue(query)
+			})
+			.Where(item => item.Value is not null)
+			.Select(item => $"{Uri.EscapeDataString(item.Name)}={Uri.EscapeDataString(item.Value!.ToString() ?? string.Empty)}")
+			.ToArray();
+
+		if (values.Length == 0)
+		{
+			return url;
+		}
+
+		var separator = url.Contains('?', StringComparison.Ordinal) ? "&" : "?";
+		return string.Concat(url, separator, string.Join("&", values));
+	}
+
+	private static string NormalizeBaseAddress(string baseAddress)
+	{
+		if (string.IsNullOrWhiteSpace(baseAddress))
+		{
+			return string.Empty;
+		}
+
+		return baseAddress.EndsWith("/", StringComparison.Ordinal)
+			? baseAddress
+			: string.Concat(baseAddress, "/");
+	}
+}
