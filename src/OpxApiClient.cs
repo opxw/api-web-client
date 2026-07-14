@@ -165,6 +165,40 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		return SendAsync<T>(method, path, request).GetAwaiter().GetResult();
 	}
 
+	public async Task<OpxDownloadResult> DownloadAsync(
+		string path,
+		Stream destination,
+		OpxApiRequest? request = null,
+		IProgress<OpxDownloadProgress>? progress = null,
+		CancellationToken cancellationToken = default)
+	{
+		ArgumentNullException.ThrowIfNull(destination);
+
+		if (!destination.CanWrite)
+		{
+			throw new ArgumentException("Destination stream must be writable.", nameof(destination));
+		}
+
+		var manualBearerToken = !string.IsNullOrWhiteSpace(request?.BearerToken);
+		var bearerToken = await GetBearerTokenAsync(request, cancellationToken);
+		using var message = CreateRequest(HttpMethod.Get, path, request, bearerToken, acceptJson: false);
+		var result = await DownloadCoreAsync(message, destination, progress, cancellationToken);
+
+		if (!_options.RetryOnceOnUnauthorized || manualBearerToken || result.StatusCode != "401" || _tokenProvider is null)
+		{
+			return result;
+		}
+
+		var refreshedToken = await _tokenProvider.RefreshTokenAsync(cancellationToken);
+		if (refreshedToken is not { HasAccessToken: true })
+		{
+			return result;
+		}
+
+		using var retryMessage = CreateRequest(HttpMethod.Get, path, request, refreshedToken.AccessToken, acceptJson: false);
+		return await DownloadCoreAsync(retryMessage, destination, progress, cancellationToken);
+	}
+
 	public void Dispose()
 	{
 		_responseMessage?.Dispose();
@@ -172,6 +206,74 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		{
 			_httpClient.Dispose();
 		}
+	}
+
+	private async Task<OpxDownloadResult> DownloadCoreAsync(
+		HttpRequestMessage message,
+		Stream destination,
+		IProgress<OpxDownloadProgress>? progress,
+		CancellationToken cancellationToken)
+	{
+		HttpResponseMessage? responseMessage = null;
+		try
+		{
+			responseMessage = await _httpClient.SendAsync(
+				message,
+				HttpCompletionOption.ResponseHeadersRead,
+				cancellationToken);
+			var statusCode = GetStatusCode(responseMessage);
+			var totalBytes = responseMessage.Content.Headers.ContentLength;
+
+			if (!responseMessage.IsSuccessStatusCode)
+			{
+				_errorMessage = !string.IsNullOrWhiteSpace(responseMessage.ReasonPhrase)
+					? responseMessage.ReasonPhrase!
+					: responseMessage.ToString();
+				return OpxDownloadResult.Fail(_errorMessage, statusCode, totalBytes: totalBytes);
+			}
+
+			await using var source = await responseMessage.Content.ReadAsStreamAsync(cancellationToken);
+			var bytesRead = await CopyToAsync(source, destination, totalBytes, progress, cancellationToken);
+			return OpxDownloadResult.Success(bytesRead, totalBytes, statusCode);
+		}
+		catch (OperationCanceledException)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_errorMessage = ex.Message;
+			return OpxDownloadResult.Fail(_errorMessage, GetStatusCode(responseMessage));
+		}
+		finally
+		{
+			if (responseMessage is not null)
+			{
+				var previousResponse = Interlocked.Exchange(ref _responseMessage, responseMessage);
+				previousResponse?.Dispose();
+			}
+		}
+	}
+
+	private static async Task<long> CopyToAsync(
+		Stream source,
+		Stream destination,
+		long? totalBytes,
+		IProgress<OpxDownloadProgress>? progress,
+		CancellationToken cancellationToken)
+	{
+		var buffer = new byte[81920];
+		long bytesRead = 0;
+		int read;
+
+		while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+		{
+			await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+			bytesRead += read;
+			progress?.Report(new OpxDownloadProgress(bytesRead, totalBytes));
+		}
+
+		return bytesRead;
 	}
 
 	private async Task<OpxApiResult<T>> SendCoreAsync<T>(HttpRequestMessage message, CancellationToken cancellationToken)
@@ -318,7 +420,12 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			: null;
 	}
 
-	private HttpRequestMessage CreateRequest(HttpMethod method, string path, OpxApiRequest? request, string? bearerToken)
+	private HttpRequestMessage CreateRequest(
+		HttpMethod method,
+		string path,
+		OpxApiRequest? request,
+		string? bearerToken,
+		bool acceptJson = true)
 	{
 		var url = BuildUrl(path, request);
 		_requestedUrl = url;
@@ -328,7 +435,7 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			VersionPolicy = _httpVersionPolicy
 		};
 
-		message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+		message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(acceptJson ? "application/json" : "*/*"));
 		if (!string.IsNullOrWhiteSpace(bearerToken))
 		{
 			message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);

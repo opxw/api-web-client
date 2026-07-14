@@ -347,11 +347,93 @@ public class OpxApiClientTests
 		});
 	}
 
+	[Test]
+	public async Task DownloadAsync_WhenResponseIsBinary_StreamsToDestinationAndReportsProgress()
+	{
+		var payload = Encoding.UTF8.GetBytes("zip-content");
+		var progressValues = new List<OpxDownloadProgress>();
+		var handler = new StubHttpMessageHandler(_ => BinaryResponse(payload));
+		using var client = new OpxApiClient("https://chinook.local", handler: handler);
+		await using var destination = new MemoryStream();
+
+		var result = await client.DownloadAsync(
+			"/api/files/{id}",
+			destination,
+			new OpxApiRequest
+			{
+				FromRoute = new { id = 10 },
+				FromQuery = new { version = "1.0.0" },
+				BearerToken = "download-token",
+				Headers = new Dictionary<string, string?> { ["X-Download"] = "zip" }
+			},
+			new Progress<OpxDownloadProgress>(progressValues.Add));
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.IsSuccess, Is.True);
+			Assert.That(result.BytesRead, Is.EqualTo(payload.Length));
+			Assert.That(result.TotalBytes, Is.EqualTo(payload.Length));
+			Assert.That(destination.ToArray(), Is.EqualTo(payload));
+			Assert.That(progressValues.Last().BytesRead, Is.EqualTo(payload.Length));
+			Assert.That(progressValues.Last().Percent, Is.EqualTo(100d).Within(0.01d));
+			Assert.That(handler.LastRequest?.RequestUri?.ToString(), Is.EqualTo("https://chinook.local/api/files/10?version=1.0.0"));
+			Assert.That(handler.LastRequest?.Headers.Accept.Single().MediaType, Is.EqualTo("*/*"));
+			Assert.That(handler.LastRequest?.Headers.Authorization?.Parameter, Is.EqualTo("download-token"));
+			Assert.That(handler.LastRequest?.Headers.GetValues("X-Download").Single(), Is.EqualTo("zip"));
+		});
+	}
+
+	[Test]
+	public async Task DownloadAsync_WhenUnauthorized_RefreshesAndRetriesOnce()
+	{
+		var tokenProvider = new OpxInMemoryTokenProvider
+		{
+			RefreshAsync = (_, _) => Task.FromResult<OpxTokenState?>(new OpxTokenState
+			{
+				AccessToken = "retry-download-token",
+				RefreshToken = "refresh-token",
+				ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(15)
+			})
+		};
+		await tokenProvider.SetTokenAsync("old-download-token", "refresh-token", DateTimeOffset.UtcNow.AddMinutes(10));
+		var tokens = new List<string?>();
+		var call = 0;
+		var payload = Encoding.UTF8.GetBytes("zip-content");
+		var handler = new StubHttpMessageHandler(request =>
+		{
+			tokens.Add(request.Headers.Authorization?.Parameter);
+			call++;
+			return call == 1
+				? new HttpResponseMessage(HttpStatusCode.Unauthorized) { ReasonPhrase = "Unauthorized" }
+				: BinaryResponse(payload);
+		});
+		using var client = new OpxApiClient("https://chinook.local", handler: handler, tokenProvider: tokenProvider);
+		await using var destination = new MemoryStream();
+
+		var result = await client.DownloadAsync("/api/files/update.zip", destination);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.IsSuccess, Is.True);
+			Assert.That(call, Is.EqualTo(2));
+			Assert.That(tokens, Is.EqualTo(new[] { "old-download-token", "retry-download-token" }));
+			Assert.That(destination.ToArray(), Is.EqualTo(payload));
+		});
+	}
+
 	private static HttpResponseMessage JsonResponse(string json)
 	{
 		return new HttpResponseMessage(HttpStatusCode.OK)
 		{
 			Content = new StringContent(json, Encoding.UTF8, "application/json")
+		};
+	}
+
+	private static HttpResponseMessage BinaryResponse(byte[] payload)
+	{
+		return new HttpResponseMessage(HttpStatusCode.OK)
+		{
+			Content = new ByteArrayContent(payload)
 		};
 	}
 

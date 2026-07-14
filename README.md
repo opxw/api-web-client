@@ -15,6 +15,7 @@ Typed client wrapper for the `Opx.Api.Web` response contract.
 - Retry once on OPX `401`.
 - CancellationToken overloads.
 - Fast JSON `data` parsing to `<T>`.
+- Streaming download for large files without buffering full content in memory.
 
 ## Register with HttpClientFactory
 
@@ -152,6 +153,37 @@ var result = await client.GetAsync<UserDto>("/api/users/me", new OpxApiRequest
 	BearerToken = token
 });
 ```
+
+## Streaming Download
+
+Use `DownloadAsync` for large files such as updater ZIP packages:
+
+```csharp
+await using var file = File.Create("update.zip");
+var progress = new Progress<OpxDownloadProgress>(value =>
+{
+	if (value.Percent.HasValue)
+	{
+		Console.WriteLine($"{value.Percent.Value:N2}%");
+	}
+});
+
+var result = await client.DownloadAsync(
+	"/api/updates/{version}/package",
+	file,
+	new OpxApiRequest
+	{
+		FromRoute = new { version = "1.0.7" },
+		Headers = new Dictionary<string, string?>
+		{
+			["X-Updater"] = "opx"
+		}
+	},
+	progress,
+	cancellationToken);
+```
+
+`DownloadAsync` uses `HttpCompletionOption.ResponseHeadersRead`, writes directly to the destination stream, supports custom headers and bearer token auto-refresh, and retries once on HTTP `401`.
 
 ## Chinook Sample
 
