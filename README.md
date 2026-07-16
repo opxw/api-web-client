@@ -16,6 +16,7 @@ Typed client wrapper for the `Opx.Api.Web` response contract.
 - CancellationToken overloads.
 - Fast JSON `data` parsing to `<T>`.
 - Streaming download for large files without buffering full content in memory.
+- Native WebSocket client with typed messages, topics, ACK, heartbeat, automatic reconnect, and resubscribe.
 
 ## Register with HttpClientFactory
 
@@ -185,6 +186,51 @@ var result = await client.DownloadAsync(
 
 `DownloadAsync` uses `HttpCompletionOption.ResponseHeadersRead`, writes directly to the destination stream, supports custom headers and bearer token auto-refresh, and retries once on HTTP `401`.
 
+## WebSocket Client
+
+Register a default or named realtime source:
+
+```csharp
+builder.Services.AddOpxInMemoryTokenProvider();
+builder.Services.AddOpxApiWebSocketClient("chinook-realtime", "https://api.server.com", options =>
+{
+	options.AutoReconnect = true;
+	options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+	options.AckTimeout = TimeSpan.FromSeconds(10);
+});
+```
+
+Create one stateful client for the consumer lifetime, connect, and subscribe:
+
+```csharp
+await using var realtime = webSocketFactory.CreateClient("chinook-realtime");
+await realtime.ConnectAsync("/ws/chinook", cancellationToken);
+await realtime.SubscribeAsync("artists", cancellationToken);
+
+var messageId = await realtime.SendAsync(
+	"artist.watch",
+	new { artistId = 1 },
+	requireAck: true,
+	cancellationToken: cancellationToken);
+
+await foreach (var message in realtime.ReadAllAsync(cancellationToken))
+{
+	if (message.Type == "artist.updated")
+	{
+		var artist = message.GetData<ArtistDto>();
+	}
+}
+```
+
+The client uses the registered `IOpxTokenProvider` before the initial connection and each reconnect. It reconnects with exponential backoff and jitter, then restores all topic subscriptions. Application messages are not replayed automatically, preventing duplicate writes; use `requireAck` and retain the returned message ID when business-level retry is needed.
+
+Connection health is available without network I/O:
+
+```csharp
+var health = realtime.GetHealth();
+Console.WriteLine($"connected={health.Connected}, reconnects={health.Reconnects}, pong={health.LastPongAt}");
+```
+
 ## Chinook Sample
 
 Run the Chinook API first, then:
@@ -201,6 +247,7 @@ GET /api/artists => result=True, statusCode=200, count=275
 GET /api/artists/1 => result=True, name=AC/DC
 SYNC GET /api/artists/2 => result=True, name=Accept
 GET /api/artists/with-albums => result=True, count=275
+WS artist.watch => ack=<message-id>, artistId=1, reconnects=0
 ```
 
 ## Test
@@ -234,9 +281,10 @@ Recent parse result:
 ```text
 Payload artists: 1000
 Iterations: 200
-Legacy JsonElement->T: 623 ms
-Fast data->T: 334 ms
-Delta: 289 ms
+Legacy JsonElement->T: 1307 ms
+Fast data->T: 569 ms
+Delta: 738 ms
+Opx WebSocket client 500 acknowledged messages: 253 ms
 ```
 
 ## Release Pack

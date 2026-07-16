@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Opx.Api.Client.csproj" />
+    <PackageReference Include="Opx.Api.Client" Version="1.0.9" />
   </ItemGroup>
 
 </Project>

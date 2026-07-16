@@ -6,6 +6,37 @@ namespace Opx.Api.Client;
 
 public static class ServiceCollectionExtensions
 {
+	private const string DefaultWebSocketClientName = "default";
+
+	public static IServiceCollection AddOpxApiWebSocketClient(
+		this IServiceCollection services,
+		string baseAddress,
+		Action<OpxWebSocketClientOptions>? configure = null)
+	{
+		services.AddOpxApiWebSocketClient(DefaultWebSocketClientName, baseAddress, configure);
+		services.TryAddScoped<IOpxWebSocketClient>(provider =>
+			provider.GetRequiredService<IOpxWebSocketClientFactory>().CreateClient(DefaultWebSocketClientName));
+		return services;
+	}
+
+	public static IServiceCollection AddOpxApiWebSocketClient(
+		this IServiceCollection services,
+		string name,
+		string baseAddress,
+		Action<OpxWebSocketClientOptions>? configure = null)
+	{
+		if (string.IsNullOrWhiteSpace(name))
+		{
+			throw new ArgumentException("WebSocket client name is required.", nameof(name));
+		}
+
+		var options = new OpxWebSocketClientOptions { BaseAddress = baseAddress };
+		configure?.Invoke(options);
+		services.AddSingleton(new OpxNamedWebSocketClientOptions(name, options));
+		services.TryAddScoped<IOpxWebSocketClientFactory, OpxWebSocketClientFactory>();
+		return services;
+	}
+
 	public static IHttpClientBuilder AddOpxApiClient(
 		this IServiceCollection services,
 		string baseAddress,

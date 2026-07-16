@@ -6,6 +6,11 @@ var baseUrl = Environment.GetEnvironmentVariable("CHINOOK_API_BASE_URL") ?? "htt
 
 var services = new ServiceCollection();
 services.AddOpxApiClient("chinook", baseUrl);
+services.AddOpxApiWebSocketClient("chinook-realtime", baseUrl, options =>
+{
+	options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+	options.AutoReconnect = true;
+});
 
 await using var provider = services.BuildServiceProvider();
 var factory = provider.GetRequiredService<IOpxApiClientFactory>();
@@ -32,6 +37,23 @@ Console.WriteLine($"SYNC GET /api/artists/2 => result={syncArtist.Result}, name=
 var artistsWithAlbums = await client.GetAsync<List<ArtistWithAlbumsDto>>("/api/artists/with-albums");
 Console.WriteLine($"GET /api/artists/with-albums => result={artistsWithAlbums.Result}, count={artistsWithAlbums.Data?.Count ?? 0}");
 
+await using var realtime = provider.GetRequiredService<IOpxWebSocketClientFactory>().CreateClient("chinook-realtime");
+await realtime.ConnectAsync("/ws/chinook", cancellation.Token);
+await realtime.SubscribeAsync("artists", cancellation.Token);
+var messageId = await realtime.SendAsync("artist.watch", new { artistId = 1 }, requireAck: true, cancellationToken: cancellation.Token);
+
+await foreach (var message in realtime.ReadAllAsync(cancellation.Token))
+{
+	if (!message.Type.Equals("artist.watching", StringComparison.OrdinalIgnoreCase))
+	{
+		continue;
+	}
+
+	Console.WriteLine($"WS artist.watch => ack={messageId}, artistId={message.GetData<ArtistWatchDto>()?.ArtistId}, reconnects={realtime.GetHealth().Reconnects}");
+	break;
+}
+
 public sealed record ArtistDto(int ArtistId, string Name);
 public sealed record AlbumDto(int AlbumId, string Title);
 public sealed record ArtistWithAlbumsDto(int ArtistId, string Name, List<AlbumDto> Albums);
+public sealed record ArtistWatchDto(int ArtistId);
