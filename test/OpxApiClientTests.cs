@@ -114,6 +114,171 @@ public class OpxApiClientTests
 	}
 
 	[Test]
+	public async Task GetAsync_WhenHttpUnauthorizedContainsOpxResponse_ParsesBody()
+	{
+		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+			{
+			  "result": false,
+			  "data": { "message": "Token expired" },
+			  "statusCode": "401"
+			}
+			""", HttpStatusCode.Unauthorized));
+		using var client = new OpxApiClient("https://chinook.local", handler: handler);
+
+		var result = await client.GetAsync<ArtistDto>("/api/artists");
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.Result, Is.False);
+			Assert.That(result.IsSuccess, Is.False);
+			Assert.That(result.StatusCode, Is.EqualTo("401"));
+			Assert.That(result.Message, Is.EqualTo("Token expired"));
+		});
+	}
+
+	[Test]
+	public async Task GetAsync_WhenErrorBodyParsingDisabled_UsesHttpReasonPhrase()
+	{
+		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+			{
+			  "result": false,
+			  "data": { "message": "Token expired" },
+			  "statusCode": "401"
+			}
+			""", HttpStatusCode.Unauthorized));
+		using var client = new OpxApiClient(
+			"https://chinook.local",
+			handler: handler,
+			options: new OpxApiClientOptions { ParseErrorResponseBody = false });
+
+		var result = await client.GetAsync<ArtistDto>("/api/artists");
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.Result, Is.False);
+			Assert.That(result.StatusCode, Is.EqualTo("401"));
+			Assert.That(result.Message, Is.EqualTo("Unauthorized"));
+		});
+	}
+
+	[Test]
+	public async Task GetAsync_WhenHttpErrorBodyIsNotJson_UsesHttpReasonPhrase()
+	{
+		var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.BadGateway)
+		{
+			Content = new StringContent("upstream unavailable", Encoding.UTF8, "text/plain")
+		});
+		using var client = new OpxApiClient("https://chinook.local", handler: handler);
+
+		var result = await client.GetAsync<ArtistDto>("/api/artists");
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.Result, Is.False);
+			Assert.That(result.StatusCode, Is.EqualTo("502"));
+			Assert.That(result.Message, Is.EqualTo("Bad Gateway"));
+		});
+	}
+
+	[Test]
+	public async Task GetAsync_GeneratesUniqueRequestIdForEachOperation()
+	{
+		var requestIds = new List<string?>();
+		var generatedIds = new Queue<string>(["request-1", "request-2"]);
+		var handler = new StubHttpMessageHandler(request =>
+		{
+			requestIds.Add(request.Headers.GetValues("X-Request-ID").Single());
+			return JsonResponse("""
+				{
+				  "result": true,
+				  "data": true,
+				  "statusCode": "200"
+				}
+				""");
+		});
+		using var client = new OpxApiClient(
+			"https://chinook.local",
+			handler: handler,
+			options: new OpxApiClientOptions
+			{
+				RequestIdFactory = generatedIds.Dequeue
+			});
+
+		await client.GetAsync<bool>("/api/ping");
+		await client.GetAsync<bool>("/api/ping");
+
+		Assert.That(requestIds, Is.EqualTo(new[] { "request-1", "request-2" }));
+	}
+
+	[Test]
+	public async Task GetAsync_WhenRequestIdIsProvided_UsesExplicitValue()
+	{
+		string? requestId = null;
+		var handler = new StubHttpMessageHandler(request =>
+		{
+			requestId = request.Headers.GetValues("X-Request-ID").Single();
+			return JsonResponse("""
+				{
+				  "result": true,
+				  "data": true,
+				  "statusCode": "200"
+				}
+				""");
+		});
+		using var client = new OpxApiClient("https://chinook.local", handler: handler);
+
+		await client.GetAsync<bool>("/api/ping", new OpxApiRequest
+		{
+			RequestId = "caller-request-71"
+		});
+
+		Assert.That(requestId, Is.EqualTo("caller-request-71"));
+	}
+
+	[Test]
+	public async Task GetAsync_WhenRequestIdGenerationIsDisabled_DoesNotWriteHeader()
+	{
+		var hasRequestId = true;
+		var handler = new StubHttpMessageHandler(request =>
+		{
+			hasRequestId = request.Headers.Contains("X-Request-ID");
+			return JsonResponse("""
+				{
+				  "result": true,
+				  "data": true,
+				  "statusCode": "200"
+				}
+				""");
+		});
+		using var client = new OpxApiClient(
+			"https://chinook.local",
+			handler: handler,
+			options: new OpxApiClientOptions { GenerateRequestId = false });
+
+		await client.GetAsync<bool>("/api/ping");
+
+		Assert.That(hasRequestId, Is.False);
+	}
+
+	[Test]
+	public void OpxClientDeviceMetadata_FactoriesCreateExpectedDeviceTypes()
+	{
+		var desktop = OpxClientDeviceMetadata.CreateDesktop("desktop-1", "Trust Desktop", "5.0.0");
+		var mobile = OpxClientDeviceMetadata.CreateMobile("mobile-1", "Trust Mobile", "3.2.1", "OPX Phone", "Android");
+		var web = OpxClientDeviceMetadata.CreateWeb("browser-1", "Trust Web", "2.0.0", "Chrome/Windows");
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(desktop.DeviceType, Is.EqualTo(OpxClientDeviceTypes.Desktop));
+			Assert.That(desktop.DeviceName, Is.Not.Empty);
+			Assert.That(mobile.DeviceType, Is.EqualTo(OpxClientDeviceTypes.Mobile));
+			Assert.That(mobile.Platform, Is.EqualTo("Android"));
+			Assert.That(web.DeviceType, Is.EqualTo(OpxClientDeviceTypes.Web));
+			Assert.That(web.DeviceId, Is.EqualTo("browser-1"));
+		});
+	}
+
+	[Test]
 	public async Task HttpClientFactory_WhenRegistered_ResolvesTypedOpxApiClient()
 	{
 		var services = new ServiceCollection();
@@ -280,10 +445,12 @@ public class OpxApiClientTests
 		};
 		await tokenProvider.SetTokenAsync("old-token", "refresh-token", DateTimeOffset.UtcNow.AddMinutes(10));
 		var tokens = new List<string?>();
+		var requestIds = new List<string?>();
 		var call = 0;
 		var handler = new StubHttpMessageHandler(request =>
 		{
 			tokens.Add(request.Headers.Authorization?.Parameter);
+			requestIds.Add(request.Headers.GetValues("X-Request-ID").Single());
 			call++;
 
 			return call == 1
@@ -293,7 +460,7 @@ public class OpxApiClientTests
 					  "data": { "message": "Unauthorized" },
 					  "statusCode": "401"
 					}
-					""")
+					""", HttpStatusCode.Unauthorized)
 				: JsonResponse("""
 					{
 					  "result": true,
@@ -302,7 +469,11 @@ public class OpxApiClientTests
 					}
 					""");
 		});
-		using var client = new OpxApiClient("https://chinook.local", handler: handler, tokenProvider: tokenProvider);
+		using var client = new OpxApiClient(
+			"https://chinook.local",
+			handler: handler,
+			tokenProvider: tokenProvider,
+			options: new OpxApiClientOptions { RequestIdFactory = () => "retry-request-1" });
 
 		var result = await client.GetAsync<ArtistDto>("/api/artists/1");
 
@@ -311,6 +482,7 @@ public class OpxApiClientTests
 			Assert.That(result.IsSuccess, Is.True);
 			Assert.That(call, Is.EqualTo(2));
 			Assert.That(tokens, Is.EqualTo(new[] { "old-token", "retry-token" }));
+			Assert.That(requestIds, Is.EqualTo(new[] { "retry-request-1", "retry-request-1" }));
 		});
 	}
 
@@ -421,9 +593,59 @@ public class OpxApiClientTests
 		});
 	}
 
-	private static HttpResponseMessage JsonResponse(string json)
+	[Test]
+	public async Task PostDownloadAsync_WhenMultipartResponseIsBinary_StreamsBothDirections()
 	{
-		return new HttpResponseMessage(HttpStatusCode.OK)
+		var input = Encoding.UTF8.GetBytes("document-content");
+		var output = Encoding.UTF8.GetBytes("converted-content");
+		var handler = new StubHttpMessageHandler(_ => BinaryResponse(output));
+		using var client = new OpxApiClient("https://documents.local", handler: handler);
+		await using var destination = new MemoryStream();
+
+		var result = await client.PostDownloadAsync(
+			"api/v1/document-conversions",
+			destination,
+			new OpxApiRequest
+			{
+				BearerToken = "document-token",
+				FromMultipart = new OpxMultipartFormData
+				{
+					Fields = new Dictionary<string, string?>
+					{
+						["targetFormat"] = "Pdf"
+					},
+					Files =
+					[
+						new OpxMultipartFile
+						{
+							Name = "file",
+							FileName = "report.docx",
+							ContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+							OpenReadStream = () => new MemoryStream(input, writable: false)
+						}
+					]
+				}
+			});
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.IsSuccess, Is.True);
+			Assert.That(destination.ToArray(), Is.EqualTo(output));
+			Assert.That(handler.LastRequest?.Method, Is.EqualTo(HttpMethod.Post));
+			Assert.That(handler.LastRequest?.RequestUri?.ToString(), Is.EqualTo("https://documents.local/api/v1/document-conversions"));
+			Assert.That(handler.LastRequest?.Content?.Headers.ContentType?.MediaType, Is.EqualTo("multipart/form-data"));
+			Assert.That(handler.LastRequest?.Headers.Accept.Single().MediaType, Is.EqualTo("*/*"));
+			Assert.That(handler.LastRequest?.Headers.Authorization?.Parameter, Is.EqualTo("document-token"));
+			Assert.That(handler.LastRequestBody, Does.Contain("name=targetFormat"));
+			Assert.That(handler.LastRequestBody, Does.Contain("Pdf"));
+			Assert.That(handler.LastRequestBody, Does.Contain("filename=report.docx"));
+			Assert.That(handler.LastRequestBody, Does.Contain("document-content"));
+		});
+	}
+
+	private static HttpResponseMessage JsonResponse(string json, HttpStatusCode statusCode = HttpStatusCode.OK)
+	{
+		return new HttpResponseMessage(statusCode)
 		{
 			Content = new StringContent(json, Encoding.UTF8, "application/json")
 		};

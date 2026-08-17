@@ -24,4 +24,10 @@ public interface IOpxApiClient
 		OpxApiRequest? request = null,
 		IProgress<OpxDownloadProgress>? progress = null,
 		CancellationToken cancellationToken = default);
+	Task<OpxDownloadResult> PostDownloadAsync(
+		string path,
+		Stream destination,
+		OpxApiRequest request,
+		IProgress<OpxDownloadProgress>? progress = null,
+		CancellationToken cancellationToken = default);
 }

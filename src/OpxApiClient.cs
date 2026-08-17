@@ -142,7 +142,8 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 	{
 		var manualBearerToken = !string.IsNullOrWhiteSpace(request?.BearerToken);
 		var bearerToken = await GetBearerTokenAsync(request, cancellationToken);
-		using var message = CreateRequest(method, path, request, bearerToken);
+		var requestId = ResolveRequestId(request);
+		using var message = CreateRequest(method, path, request, bearerToken, requestId);
 		var result = await SendCoreAsync<T>(message, cancellationToken);
 
 		if (!_options.RetryOnceOnUnauthorized || manualBearerToken || result.StatusCode != "401" || _tokenProvider is null)
@@ -156,7 +157,7 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			return result;
 		}
 
-		using var retryMessage = CreateRequest(method, path, request, refreshedToken.AccessToken);
+		using var retryMessage = CreateRequest(method, path, request, refreshedToken.AccessToken, requestId);
 		return await SendCoreAsync<T>(retryMessage, cancellationToken);
 	}
 
@@ -181,7 +182,8 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 
 		var manualBearerToken = !string.IsNullOrWhiteSpace(request?.BearerToken);
 		var bearerToken = await GetBearerTokenAsync(request, cancellationToken);
-		using var message = CreateRequest(HttpMethod.Get, path, request, bearerToken, acceptJson: false);
+		var requestId = ResolveRequestId(request);
+		using var message = CreateRequest(HttpMethod.Get, path, request, bearerToken, requestId, acceptJson: false);
 		var result = await DownloadCoreAsync(message, destination, progress, cancellationToken);
 
 		if (!_options.RetryOnceOnUnauthorized || manualBearerToken || result.StatusCode != "401" || _tokenProvider is null)
@@ -195,7 +197,60 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			return result;
 		}
 
-		using var retryMessage = CreateRequest(HttpMethod.Get, path, request, refreshedToken.AccessToken, acceptJson: false);
+		using var retryMessage = CreateRequest(
+			HttpMethod.Get,
+			path,
+			request,
+			refreshedToken.AccessToken,
+			requestId,
+			acceptJson: false);
+		return await DownloadCoreAsync(retryMessage, destination, progress, cancellationToken);
+	}
+
+	public async Task<OpxDownloadResult> PostDownloadAsync(
+		string path,
+		Stream destination,
+		OpxApiRequest request,
+		IProgress<OpxDownloadProgress>? progress = null,
+		CancellationToken cancellationToken = default)
+	{
+		ArgumentNullException.ThrowIfNull(destination);
+		ArgumentNullException.ThrowIfNull(request);
+
+		if (!destination.CanWrite)
+		{
+			throw new ArgumentException("Destination stream must be writable.", nameof(destination));
+		}
+
+		if (request.FromMultipart is null)
+		{
+			throw new ArgumentException("A multipart form is required.", nameof(request));
+		}
+
+		var manualBearerToken = !string.IsNullOrWhiteSpace(request.BearerToken);
+		var bearerToken = await GetBearerTokenAsync(request, cancellationToken);
+		var requestId = ResolveRequestId(request);
+		using var message = CreateRequest(HttpMethod.Post, path, request, bearerToken, requestId, acceptJson: false);
+		var result = await DownloadCoreAsync(message, destination, progress, cancellationToken);
+
+		if (!_options.RetryOnceOnUnauthorized || manualBearerToken || result.StatusCode != "401" || _tokenProvider is null)
+		{
+			return result;
+		}
+
+		var refreshedToken = await _tokenProvider.RefreshTokenAsync(cancellationToken);
+		if (refreshedToken is not { HasAccessToken: true })
+		{
+			return result;
+		}
+
+		using var retryMessage = CreateRequest(
+			HttpMethod.Post,
+			path,
+			request,
+			refreshedToken.AccessToken,
+			requestId,
+			acceptJson: false);
 		return await DownloadCoreAsync(retryMessage, destination, progress, cancellationToken);
 	}
 
@@ -282,18 +337,23 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		try
 		{
 			responseMessage = await _httpClient.SendAsync(message, cancellationToken);
+			var httpStatusCode = GetStatusCode(responseMessage);
 
-			if (!responseMessage.IsSuccessStatusCode)
+			if (!responseMessage.IsSuccessStatusCode && !_options.ParseErrorResponseBody)
 			{
-				_errorMessage = !string.IsNullOrWhiteSpace(responseMessage.ReasonPhrase)
-					? responseMessage.ReasonPhrase!
-					: responseMessage.ToString();
-				return OpxApiResult<T>.Fail(_errorMessage, GetStatusCode(responseMessage));
+				return CreateHttpErrorResult<T>(responseMessage, httpStatusCode);
 			}
 
-			await using var stream = await responseMessage.Content.ReadAsStreamAsync(cancellationToken);
-			using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-			return ReadResponse<T>(document.RootElement, GetStatusCode(responseMessage));
+			try
+			{
+				await using var stream = await responseMessage.Content.ReadAsStreamAsync(cancellationToken);
+				using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+				return ReadResponse<T>(document.RootElement, httpStatusCode);
+			}
+			catch (JsonException) when (!responseMessage.IsSuccessStatusCode)
+			{
+				return CreateHttpErrorResult<T>(responseMessage, httpStatusCode);
+			}
 		}
 		catch (OperationCanceledException)
 		{
@@ -312,6 +372,14 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 				previousResponse?.Dispose();
 			}
 		}
+	}
+
+	private OpxApiResult<T> CreateHttpErrorResult<T>(HttpResponseMessage responseMessage, string statusCode)
+	{
+		_errorMessage = !string.IsNullOrWhiteSpace(responseMessage.ReasonPhrase)
+			? responseMessage.ReasonPhrase!
+			: responseMessage.ToString();
+		return OpxApiResult<T>.Fail(_errorMessage, statusCode);
 	}
 
 	private static string GetStatusCode(HttpResponseMessage? responseMessage)
@@ -425,6 +493,7 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		string path,
 		OpxApiRequest? request,
 		string? bearerToken,
+		string? requestId,
 		bool acceptJson = true)
 	{
 		var url = BuildUrl(path, request);
@@ -452,7 +521,23 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			}
 		}
 
-		if (request?.FromBody is not null)
+		if (!string.IsNullOrWhiteSpace(requestId)
+			&& !string.IsNullOrWhiteSpace(_options.RequestIdHeaderName)
+			&& !message.Headers.Contains(_options.RequestIdHeaderName))
+		{
+			message.Headers.TryAddWithoutValidation(_options.RequestIdHeaderName, requestId);
+		}
+
+		if (request?.FromBody is not null && request.FromMultipart is not null)
+		{
+			throw new InvalidOperationException("A request cannot contain both JSON body and multipart form data.");
+		}
+
+		if (request?.FromMultipart is not null)
+		{
+			message.Content = CreateMultipartContent(request.FromMultipart);
+		}
+		else if (request?.FromBody is not null)
 		{
 			var json = JsonSerializer.Serialize(request.FromBody, _jsonOptions);
 			message.Content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -463,6 +548,88 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		}
 
 		return message;
+	}
+
+	private static MultipartFormDataContent CreateMultipartContent(OpxMultipartFormData form)
+	{
+		var content = new MultipartFormDataContent();
+
+		try
+		{
+			foreach (var field in form.Fields)
+			{
+				if (string.IsNullOrWhiteSpace(field.Key))
+				{
+					throw new ArgumentException("Multipart field names cannot be empty.", nameof(form));
+				}
+
+				content.Add(new StringContent(field.Value ?? string.Empty, Encoding.UTF8), field.Key);
+			}
+
+			foreach (var file in form.Files)
+			{
+				if (string.IsNullOrWhiteSpace(file.Name) || string.IsNullOrWhiteSpace(file.FileName))
+				{
+					throw new ArgumentException("Multipart file name and form field name are required.", nameof(form));
+				}
+
+				var stream = file.OpenReadStream()
+					?? throw new InvalidOperationException("Multipart file stream factory returned null.");
+
+				if (!stream.CanRead)
+				{
+					stream.Dispose();
+					throw new ArgumentException("Multipart file stream must be readable.", nameof(form));
+				}
+
+				var fileContent = new StreamContent(stream);
+				if (!MediaTypeHeaderValue.TryParse(file.ContentType, out var contentType))
+				{
+					fileContent.Dispose();
+					throw new ArgumentException("Multipart file content type is invalid.", nameof(form));
+				}
+
+				fileContent.Headers.ContentType = contentType;
+				content.Add(fileContent, file.Name, Path.GetFileName(file.FileName));
+			}
+
+			return content;
+		}
+		catch
+		{
+			content.Dispose();
+			throw;
+		}
+	}
+
+	private string? ResolveRequestId(OpxApiRequest? request)
+	{
+		var requestId = request?.RequestId;
+		if (string.IsNullOrWhiteSpace(requestId)
+			&& request?.Headers is not null
+			&& !string.IsNullOrWhiteSpace(_options.RequestIdHeaderName)
+			&& request.Headers.TryGetValue(_options.RequestIdHeaderName, out var headerRequestId))
+		{
+			requestId = headerRequestId;
+		}
+
+		if (string.IsNullOrWhiteSpace(requestId) && _options.GenerateRequestId)
+		{
+			requestId = _options.RequestIdFactory();
+		}
+
+		if (string.IsNullOrWhiteSpace(requestId))
+		{
+			return null;
+		}
+
+		requestId = requestId.Trim();
+		if (requestId.Length > 128)
+		{
+			throw new ArgumentException("Request ID cannot exceed 128 characters.", nameof(request));
+		}
+
+		return requestId;
 	}
 
 	private string BuildUrl(string path, OpxApiRequest? request)

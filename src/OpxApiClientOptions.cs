@@ -9,4 +9,8 @@ public sealed class OpxApiClientOptions
 	public TimeSpan Timeout { get; set; } = System.Threading.Timeout.InfiniteTimeSpan;
 	public TimeSpan RefreshTokenBeforeExpires { get; set; } = TimeSpan.FromSeconds(60);
 	public bool RetryOnceOnUnauthorized { get; set; } = true;
+	public bool ParseErrorResponseBody { get; set; } = true;
+	public bool GenerateRequestId { get; set; } = true;
+	public string RequestIdHeaderName { get; set; } = "X-Request-ID";
+	public Func<string> RequestIdFactory { get; set; } = static () => Guid.NewGuid().ToString("N");
 }

@@ -5,7 +5,13 @@ using Opx.Api.Client;
 var baseUrl = Environment.GetEnvironmentVariable("CHINOOK_API_BASE_URL") ?? "http://localhost:5141";
 
 var services = new ServiceCollection();
-services.AddOpxApiClient("chinook", baseUrl);
+services.AddOpxApiClient("chinook", configure: options =>
+{
+	options.BaseAddress = baseUrl;
+	options.ParseErrorResponseBody = true;
+	options.GenerateRequestId = true;
+	options.RequestIdHeaderName = "X-Request-ID";
+});
 services.AddOpxApiWebSocketClient("chinook-realtime", baseUrl, options =>
 {
 	options.HeartbeatInterval = TimeSpan.FromSeconds(30);
