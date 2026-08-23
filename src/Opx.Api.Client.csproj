@@ -15,10 +15,10 @@
     <Copyright>Copyright (c) 2026 - opx</Copyright>
     <PackageTags>opx;api;client;http;websocket;realtime;wrapper</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <Version>1.0.13</Version>
-    <AssemblyVersion>1.0.13</AssemblyVersion>
-    <FileVersion>1.0.13.20260817</FileVersion>
-    <InformationalVersion>1.0.13.20260817</InformationalVersion>
+    <Version>1.0.14</Version>
+    <AssemblyVersion>1.0.14</AssemblyVersion>
+    <FileVersion>1.0.14.20260823</FileVersion>
+    <InformationalVersion>1.0.14.20260823</InformationalVersion>
     <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
     <NoWarn>$(NoWarn);7035</NoWarn>
   </PropertyGroup>

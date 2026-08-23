@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 - opx
+// Copyright (c) 2026 - opx
 using System.Reflection;
 
-[assembly: AssemblyFileVersion("1.0.13.20260817")]
+[assembly: AssemblyFileVersion("1.0.14.20260823")]
