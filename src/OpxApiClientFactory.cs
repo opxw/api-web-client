@@ -1,5 +1,6 @@
 // Copyright (c) 2026 - opx
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Opx.Api.Client;
 
@@ -28,6 +29,7 @@ internal sealed class OpxApiClientFactory : IOpxApiClientFactory
 
 		var httpClient = _httpClientFactory.CreateClient(name);
 		var tokenProvider = _serviceProvider.GetService<IOpxTokenProvider>();
-		return new OpxApiClient(httpClient, options, tokenProvider);
+		var logger = _serviceProvider.GetService<ILogger<OpxApiClient>>();
+		return new OpxApiClient(httpClient, options, tokenProvider, logger);
 	}
 }

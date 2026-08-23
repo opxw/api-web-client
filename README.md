@@ -17,6 +17,7 @@ Typed client wrapper for the `Opx.Api.Web` response contract.
 - CancellationToken overloads.
 - Fast JSON `data` parsing to `<T>`.
 - Configurable OPX body parsing for HTTP `4xx` and `5xx` responses.
+- Opt-in structured logging for the executed endpoint and result status code.
 - Streaming download for large files without buffering full content in memory.
 - Streaming multipart upload with a binary response, including retry-safe stream factories.
 - Native WebSocket client with typed messages, topics, ACK, heartbeat, automatic reconnect, and resubscribe.
@@ -49,6 +50,21 @@ builder.Services.AddOpxApiClient(options =>
 ```
 
 `ParseErrorResponseBody` defaults to `true`. Set it to `false` to use only the HTTP status and reason phrase for non-success responses.
+
+Executed endpoint logging is disabled by default. Enable it per client when the
+HTTP method, endpoint path, and resulting OPX/HTTP status code are needed:
+
+```csharp
+builder.Services.AddOpxApiClient(options =>
+{
+	options.BaseAddress = "https://api.server.com";
+	options.EnableExecutedEndpointLogging = true;
+});
+```
+
+The structured Information log includes `HttpMethod`, `ExecutedEndpoint`, and
+`ResultStatusCode`. The endpoint excludes its query string, and request headers
+and bodies are never logged by this feature.
 
 Usage:
 

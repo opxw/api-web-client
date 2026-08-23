@@ -2,6 +2,7 @@
 using System.Text.Json;
 using System.Text;
 using System.Net.Http.Headers;
+using Microsoft.Extensions.Logging;
 
 namespace Opx.Api.Client;
 
@@ -14,6 +15,7 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 	private readonly HttpVersionPolicy _httpVersionPolicy;
 	private readonly OpxApiClientOptions _options;
 	private readonly IOpxTokenProvider? _tokenProvider;
+	private readonly ILogger<OpxApiClient>? _logger;
 	private string _baseAddress;
 	private string _errorMessage = string.Empty;
 	private string _requestedUrl = string.Empty;
@@ -25,10 +27,12 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		HttpVersionPolicy httpVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
 		HttpMessageHandler? handler = null,
 		IOpxTokenProvider? tokenProvider = null,
-		OpxApiClientOptions? options = null)
+		OpxApiClientOptions? options = null,
+		ILogger<OpxApiClient>? logger = null)
 	{
 		_options = options ?? new OpxApiClientOptions();
 		_tokenProvider = tokenProvider;
+		_logger = logger;
 		_httpVersion = httpVersion ?? System.Net.HttpVersion.Version20;
 		_httpVersionPolicy = httpVersionPolicy;
 		_httpClient = handler is null
@@ -43,10 +47,15 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		};
 	}
 
-	public OpxApiClient(HttpClient httpClient, OpxApiClientOptions? options = null, IOpxTokenProvider? tokenProvider = null)
+	public OpxApiClient(
+		HttpClient httpClient,
+		OpxApiClientOptions? options = null,
+		IOpxTokenProvider? tokenProvider = null,
+		ILogger<OpxApiClient>? logger = null)
 	{
 		_options = options ?? new OpxApiClientOptions();
 		_tokenProvider = tokenProvider;
+		_logger = logger;
 		_httpClient = httpClient;
 		_disposeHttpClient = false;
 		_httpVersion = _options.HttpVersion;
@@ -270,6 +279,7 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		CancellationToken cancellationToken)
 	{
 		HttpResponseMessage? responseMessage = null;
+		OpxDownloadResult? result = null;
 		try
 		{
 			responseMessage = await _httpClient.SendAsync(
@@ -284,12 +294,14 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 				_errorMessage = !string.IsNullOrWhiteSpace(responseMessage.ReasonPhrase)
 					? responseMessage.ReasonPhrase!
 					: responseMessage.ToString();
-				return OpxDownloadResult.Fail(_errorMessage, statusCode, totalBytes: totalBytes);
+				result = OpxDownloadResult.Fail(_errorMessage, statusCode, totalBytes: totalBytes);
+				return result;
 			}
 
 			await using var source = await responseMessage.Content.ReadAsStreamAsync(cancellationToken);
 			var bytesRead = await CopyToAsync(source, destination, totalBytes, progress, cancellationToken);
-			return OpxDownloadResult.Success(bytesRead, totalBytes, statusCode);
+			result = OpxDownloadResult.Success(bytesRead, totalBytes, statusCode);
+			return result;
 		}
 		catch (OperationCanceledException)
 		{
@@ -298,10 +310,16 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		catch (Exception ex)
 		{
 			_errorMessage = ex.Message;
-			return OpxDownloadResult.Fail(_errorMessage, GetStatusCode(responseMessage));
+			result = OpxDownloadResult.Fail(_errorMessage, GetStatusCode(responseMessage));
+			return result;
 		}
 		finally
 		{
+			if (result is not null)
+			{
+				LogExecutedEndpoint(message, result.StatusCode);
+			}
+
 			if (responseMessage is not null)
 			{
 				var previousResponse = Interlocked.Exchange(ref _responseMessage, responseMessage);
@@ -334,6 +352,7 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 	private async Task<OpxApiResult<T>> SendCoreAsync<T>(HttpRequestMessage message, CancellationToken cancellationToken)
 	{
 		HttpResponseMessage? responseMessage = null;
+		OpxApiResult<T>? result = null;
 		try
 		{
 			responseMessage = await _httpClient.SendAsync(message, cancellationToken);
@@ -341,18 +360,21 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 
 			if (!responseMessage.IsSuccessStatusCode && !_options.ParseErrorResponseBody)
 			{
-				return CreateHttpErrorResult<T>(responseMessage, httpStatusCode);
+				result = CreateHttpErrorResult<T>(responseMessage, httpStatusCode);
+				return result;
 			}
 
 			try
 			{
 				await using var stream = await responseMessage.Content.ReadAsStreamAsync(cancellationToken);
 				using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-				return ReadResponse<T>(document.RootElement, httpStatusCode);
+				result = ReadResponse<T>(document.RootElement, httpStatusCode);
+				return result;
 			}
 			catch (JsonException) when (!responseMessage.IsSuccessStatusCode)
 			{
-				return CreateHttpErrorResult<T>(responseMessage, httpStatusCode);
+				result = CreateHttpErrorResult<T>(responseMessage, httpStatusCode);
+				return result;
 			}
 		}
 		catch (OperationCanceledException)
@@ -362,10 +384,16 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		catch (Exception ex)
 		{
 			_errorMessage = ex.Message;
-			return OpxApiResult<T>.Fail(_errorMessage, GetStatusCode(responseMessage));
+			result = OpxApiResult<T>.Fail(_errorMessage, GetStatusCode(responseMessage));
+			return result;
 		}
 		finally
 		{
+			if (result is not null)
+			{
+				LogExecutedEndpoint(message, result.StatusCode);
+			}
+
 			if (responseMessage is not null)
 			{
 				var previousResponse = Interlocked.Exchange(ref _responseMessage, responseMessage);
@@ -385,6 +413,32 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 	private static string GetStatusCode(HttpResponseMessage? responseMessage)
 	{
 		return ((int?)responseMessage?.StatusCode)?.ToString() ?? "0";
+	}
+
+	private void LogExecutedEndpoint(HttpRequestMessage message, string resultStatusCode)
+	{
+		if (!_options.EnableExecutedEndpointLogging || _logger is null)
+		{
+			return;
+		}
+
+		_logger.LogInformation(
+			"Executed endpoint {HttpMethod} {ExecutedEndpoint} with result status code {ResultStatusCode}",
+			message.Method.Method,
+			GetEndpointWithoutQuery(message.RequestUri),
+			resultStatusCode);
+	}
+
+	private static string GetEndpointWithoutQuery(Uri? requestUri)
+	{
+		if (requestUri is null)
+		{
+			return string.Empty;
+		}
+
+		return requestUri.IsAbsoluteUri
+			? requestUri.GetLeftPart(UriPartial.Path)
+			: requestUri.OriginalString.Split('?', 2)[0];
 	}
 
 	private OpxApiResult<T> ReadResponse<T>(JsonElement root, string httpStatusCode)

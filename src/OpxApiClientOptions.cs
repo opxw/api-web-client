@@ -10,6 +10,7 @@ public sealed class OpxApiClientOptions
 	public TimeSpan RefreshTokenBeforeExpires { get; set; } = TimeSpan.FromSeconds(60);
 	public bool RetryOnceOnUnauthorized { get; set; } = true;
 	public bool ParseErrorResponseBody { get; set; } = true;
+	public bool EnableExecutedEndpointLogging { get; set; } = false;
 	public bool GenerateRequestId { get; set; } = true;
 	public string RequestIdHeaderName { get; set; } = "X-Request-ID";
 	public Func<string> RequestIdFactory { get; set; } = static () => Guid.NewGuid().ToString("N");

@@ -2,6 +2,7 @@
 using System.Net;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Opx.Api.Client;
 
@@ -177,6 +178,57 @@ public class OpxApiClientTests
 			Assert.That(result.Result, Is.False);
 			Assert.That(result.StatusCode, Is.EqualTo("502"));
 			Assert.That(result.Message, Is.EqualTo("Bad Gateway"));
+		});
+	}
+
+	[Test]
+	public async Task GetAsync_WhenExecutedEndpointLoggingIsDisabled_DoesNotLog()
+	{
+		var logger = new CapturingLogger<OpxApiClient>();
+		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+			{
+			  "result": true,
+			  "data": true,
+			  "statusCode": "200"
+			}
+			"""));
+		using var client = new OpxApiClient("https://chinook.local", handler: handler, logger: logger);
+
+		await client.GetAsync<bool>("/api/ping");
+
+		Assert.That(logger.Entries, Is.Empty);
+	}
+
+	[Test]
+	public async Task GetAsync_WhenExecutedEndpointLoggingIsEnabled_LogsSanitizedEndpointAndResultStatusCode()
+	{
+		var logger = new CapturingLogger<OpxApiClient>();
+		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+			{
+			  "result": false,
+			  "data": { "message": "Validation failed" },
+			  "statusCode": "422"
+			}
+			"""));
+		using var client = new OpxApiClient(
+			"https://chinook.local",
+			handler: handler,
+			options: new OpxApiClientOptions { EnableExecutedEndpointLogging = true },
+			logger: logger);
+
+		var result = await client.GetAsync<bool>(
+			"/api/artists/7",
+			new OpxApiRequest { FromQuery = new { access_token = "secret-value" } });
+
+		var entry = logger.Entries.Single();
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.StatusCode, Is.EqualTo("422"));
+			Assert.That(entry.Level, Is.EqualTo(LogLevel.Information));
+			Assert.That(entry.Properties["HttpMethod"], Is.EqualTo("GET"));
+			Assert.That(entry.Properties["ExecutedEndpoint"], Is.EqualTo("https://chinook.local/api/artists/7"));
+			Assert.That(entry.Properties["ResultStatusCode"], Is.EqualTo("422"));
+			Assert.That(entry.Message, Does.Not.Contain("secret-value"));
 		});
 	}
 
@@ -683,6 +735,39 @@ public class OpxApiClientTests
 			return Task.FromResult(_handler(request));
 		}
 	}
+
+	private sealed class CapturingLogger<T> : ILogger<T>
+	{
+		public List<LogEntry> Entries { get; } = [];
+
+		public IDisposable? BeginScope<TState>(TState state) where TState : notnull
+		{
+			return null;
+		}
+
+		public bool IsEnabled(LogLevel logLevel)
+		{
+			return true;
+		}
+
+		public void Log<TState>(
+			LogLevel logLevel,
+			EventId eventId,
+			TState state,
+			Exception? exception,
+			Func<TState, Exception?, string> formatter)
+		{
+			var properties = state is IEnumerable<KeyValuePair<string, object?>> values
+				? values.ToDictionary(item => item.Key, item => item.Value)
+				: new Dictionary<string, object?>();
+			Entries.Add(new LogEntry(logLevel, formatter(state, exception), properties));
+		}
+	}
+
+	private sealed record LogEntry(
+		LogLevel Level,
+		string Message,
+		IReadOnlyDictionary<string, object?> Properties);
 
 	private sealed record ArtistDto(int ArtistId, string Name);
 }
