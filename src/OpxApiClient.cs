@@ -368,7 +368,7 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			{
 				await using var stream = await responseMessage.Content.ReadAsStreamAsync(cancellationToken);
 				using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-				result = ReadResponse<T>(document.RootElement, httpStatusCode);
+				result = ReadResponse<T>(document.RootElement, httpStatusCode, responseMessage.IsSuccessStatusCode);
 				return result;
 			}
 			catch (JsonException) when (!responseMessage.IsSuccessStatusCode)
@@ -441,11 +441,23 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			: requestUri.OriginalString.Split('?', 2)[0];
 	}
 
-	private OpxApiResult<T> ReadResponse<T>(JsonElement root, string httpStatusCode)
+	private OpxApiResult<T> ReadResponse<T>(JsonElement root, string httpStatusCode, bool httpSucceeded)
 	{
 		if (root.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
 		{
 			return OpxApiResult<T>.Fail("Empty response", httpStatusCode);
+		}
+
+		if (_options.ResponseMode == OpxApiResponseMode.RawJson)
+		{
+			return httpSucceeded
+				? OpxApiResult<T>.FromTypedResponse(new OpxApiResponse<T>
+				{
+					Result = true,
+					StatusCode = httpStatusCode,
+					Data = ConvertData<T>(root)
+				})
+				: OpxApiResult<T>.Fail(TryReadRawMessage(root) ?? "HTTP request failed.", httpStatusCode);
 		}
 
 		var result = root.TryGetProperty("result", out var resultElement)
@@ -511,6 +523,41 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 		}
 
 		return null;
+	}
+
+	private static string? TryReadRawMessage(JsonElement root)
+	{
+		if (root.ValueKind == JsonValueKind.String)
+		{
+			return root.GetString();
+		}
+
+		if (root.ValueKind != JsonValueKind.Object)
+		{
+			return null;
+		}
+
+		if (root.TryGetProperty("message", out var message)
+			&& message.ValueKind == JsonValueKind.String)
+		{
+			return message.GetString();
+		}
+
+		if (!root.TryGetProperty("error", out var error))
+		{
+			return null;
+		}
+
+		if (error.ValueKind == JsonValueKind.String)
+		{
+			return error.GetString();
+		}
+
+		return error.ValueKind == JsonValueKind.Object
+			&& error.TryGetProperty("message", out message)
+			&& message.ValueKind == JsonValueKind.String
+				? message.GetString()
+				: null;
 	}
 
 	private async Task<string?> GetBearerTokenAsync(OpxApiRequest? request, CancellationToken cancellationToken)

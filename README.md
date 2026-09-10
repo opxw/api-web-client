@@ -17,6 +17,7 @@ Typed client wrapper for the `Opx.Api.Web` response contract.
 - CancellationToken overloads.
 - Fast JSON `data` parsing to `<T>`.
 - Configurable OPX body parsing for HTTP `4xx` and `5xx` responses.
+- Opt-in raw JSON response mode for OpenAI-compatible and other non-OPX APIs.
 - Opt-in structured logging for the executed endpoint and result status code.
 - Streaming download for large files without buffering full content in memory.
 - Streaming multipart upload with a binary response, including retry-safe stream factories.
@@ -50,6 +51,18 @@ builder.Services.AddOpxApiClient(options =>
 ```
 
 `ParseErrorResponseBody` defaults to `true`. Set it to `false` to use only the HTTP status and reason phrase for non-success responses.
+
+For a JSON API that does not return the OPX `result` / `statusCode` / `data`
+envelope, opt in per named client. The default remains `OpxEnvelope` so existing
+consumers are unchanged:
+
+```csharp
+builder.Services.AddOpxApiClient("openai-compatible", options =>
+{
+	options.BaseAddress = "https://api.provider.example/v1/";
+	options.ResponseMode = OpxApiResponseMode.RawJson;
+});
+```
 
 Executed endpoint logging is disabled by default. Enable it per client when the
 HTTP method, endpoint path, and resulting OPX/HTTP status code are needed:

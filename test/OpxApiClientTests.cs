@@ -182,6 +182,58 @@ public class OpxApiClientTests
 	}
 
 	[Test]
+	public async Task PostAsync_WhenRawJsonModeAndHttpSuccess_ReturnsTypedRoot()
+	{
+		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+			{
+			  "id": "chatcmpl-1",
+			  "model": "gpt-4o-mini",
+			  "choices": []
+			}
+			"""));
+		using var client = new OpxApiClient(
+			"https://ai.example/v1/",
+			handler: handler,
+			options: new OpxApiClientOptions { ResponseMode = OpxApiResponseMode.RawJson });
+
+		var result = await client.PostAsync<RawChatResponse>("chat/completions");
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.IsSuccess, Is.True);
+			Assert.That(result.StatusCode, Is.EqualTo("200"));
+			Assert.That(result.Data?.Id, Is.EqualTo("chatcmpl-1"));
+			Assert.That(result.Data?.Model, Is.EqualTo("gpt-4o-mini"));
+		});
+	}
+
+	[Test]
+	public async Task PostAsync_WhenRawJsonModeAndHttpError_ReturnsProviderMessage()
+	{
+		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+			{
+			  "error": {
+			    "message": "Model is not available",
+			    "type": "invalid_request_error"
+			  }
+			}
+			""", HttpStatusCode.BadRequest));
+		using var client = new OpxApiClient(
+			"https://ai.example/v1/",
+			handler: handler,
+			options: new OpxApiClientOptions { ResponseMode = OpxApiResponseMode.RawJson });
+
+		var result = await client.PostAsync<RawChatResponse>("chat/completions");
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.IsSuccess, Is.False);
+			Assert.That(result.StatusCode, Is.EqualTo("400"));
+			Assert.That(result.Message, Is.EqualTo("Model is not available"));
+		});
+	}
+
+	[Test]
 	public async Task GetAsync_WhenExecutedEndpointLoggingIsDisabled_DoesNotLog()
 	{
 		var logger = new CapturingLogger<OpxApiClient>();
@@ -770,4 +822,5 @@ public class OpxApiClientTests
 		IReadOnlyDictionary<string, object?> Properties);
 
 	private sealed record ArtistDto(int ArtistId, string Name);
+	private sealed record RawChatResponse(string Id, string Model);
 }
