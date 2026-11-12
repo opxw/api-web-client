@@ -629,14 +629,21 @@ public sealed class OpxApiClient : IOpxApiClient, IDisposable
 			message.Headers.TryAddWithoutValidation(_options.RequestIdHeaderName, requestId);
 		}
 
-		if (request?.FromBody is not null && request.FromMultipart is not null)
+		var bodyCount = (request?.FromBody is not null ? 1 : 0)
+			+ (request?.FromFormUrlEncoded is not null ? 1 : 0)
+			+ (request?.FromMultipart is not null ? 1 : 0);
+		if (bodyCount > 1)
 		{
-			throw new InvalidOperationException("A request cannot contain both JSON body and multipart form data.");
+			throw new InvalidOperationException("A request can contain only one body format: JSON, URL-encoded form, or multipart form data.");
 		}
 
 		if (request?.FromMultipart is not null)
 		{
 			message.Content = CreateMultipartContent(request.FromMultipart);
+		}
+		else if (request?.FromFormUrlEncoded is not null)
+		{
+			message.Content = new FormUrlEncodedContent(request.FromFormUrlEncoded);
 		}
 		else if (request?.FromBody is not null)
 		{

@@ -123,6 +123,25 @@ var createdSync = client.Post<ArtistDto>("/api/artists", new OpxApiRequest
 });
 ```
 
+For endpoints that expect `application/x-www-form-urlencoded`, pass form fields
+through `FromFormUrlEncoded`:
+
+```csharp
+var login = await client.PostAsync<LoginToken>("/auth/token", new OpxApiRequest
+{
+	FromFormUrlEncoded = new Dictionary<string, string?>
+	{
+		["grant_type"] = "password",
+		["username"] = userName,
+		["password"] = password
+	}
+});
+```
+
+The client sets the form content type and URL-encodes the field names and values.
+Use only one body format per request: `FromBody`, `FromFormUrlEncoded`, or
+`FromMultipart`.
+
 ## Named Clients
 
 Register multiple API sources:
