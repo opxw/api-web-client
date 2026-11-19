@@ -92,6 +92,45 @@ public class OpxApiClientTests
 	}
 
 	[Test]
+	public async Task PostAsync_WhenFormUrlEncodedBodyProvided_SendsEncodedFormFields()
+	{
+		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+			{
+			  "result": true,
+			  "data": { "accepted": true },
+			  "statusCode": "200"
+			}
+			"""));
+		using var client = new OpxApiClient("https://example.local", handler: handler);
+		var startDate = new DateTime(2026, 11, 12, 8, 30, 0);
+		var endDate = new DateTime(2026, 11, 12, 9, 45, 0);
+
+		var result = await client.PostAsync<object>("/api/search", new OpxApiRequest
+		{
+			FromFormUrlEncoded = new Dictionary<string, string?>
+			{
+				["fty"] = "All",
+				["start_date"] = startDate.ToString("yyyy-MM-dd HH:mm:ss"),
+				["end_date"] = endDate.ToString("yyyy-MM-dd HH:mm:ss"),
+				["filter_mode"] = "scanned"
+			}
+		});
+		var encodedBody = handler.LastRequestBody;
+		var decodedBody = System.Net.WebUtility.UrlDecode(encodedBody);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(result.IsSuccess, Is.True);
+			Assert.That(handler.LastRequest?.Content?.Headers.ContentType?.MediaType, Is.EqualTo("application/x-www-form-urlencoded"));
+			Assert.That(decodedBody, Does.Contain("fty=All"));
+			Assert.That(decodedBody, Does.Contain("start_date=2026-11-12 08:30:00"));
+			Assert.That(decodedBody, Does.Contain("end_date=2026-11-12 09:45:00"));
+			Assert.That(decodedBody, Does.Contain("filter_mode=scanned"));
+			Assert.That(encodedBody, Does.Contain("start_date=2026-11-12+08%3A30%3A00"));
+		});
+	}
+
+	[Test]
 	public async Task GetAsync_WhenOpxErrorResponse_ReturnsMessageAndStatusCode()
 	{
 		var handler = new StubHttpMessageHandler(_ => JsonResponse("""
